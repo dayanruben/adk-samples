@@ -1041,22 +1041,6 @@ wheels = [
 ]
 
 [[package]]
-name = "google-cloud-vectorsearch"
-version = "0.11.1"
-source = { registry = "https://pypi.org/simple/" }
-dependencies = [
-    { name = "google-api-core", extra = ["grpc"] },
-    { name = "google-auth" },
-    { name = "grpcio" },
-    { name = "proto-plus" },
-    { name = "protobuf" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/28/e3/57c1b128db5b376e79f477bb1fa0f221ead3245c1a9c9a47e07ffee9cf01/google_cloud_vectorsearch-0.11.1.tar.gz", hash = "sha256:fb4723a6668fc633a1e780dec85f436a417228f346b25477afbcf288c311c393", size = 420502, upload-time = "2026-06-25T23:39:51.32Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/84/35ba064d3b9a4a2ccd917e374941670ebab016e3210b3f024bb1cee4e736/google_cloud_vectorsearch-0.11.1-py3-none-any.whl", hash = "sha256:005e3829e0303853ffa114483283b6bc747537b155fc90aca36e815d1c649ec3", size = 356382, upload-time = "2026-06-25T23:39:20.86Z" },
-]
-
-[[package]]
 name = "google-crc32c"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple/" }
@@ -2418,13 +2402,12 @@ wheels = [
 ]
 
 [[package]]
-name = "rag-vector-search"
+name = "rag-agent-search"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-adk", extra = ["gcp"] },
     { name = "google-cloud-aiplatform", extra = ["evaluation"] },
-    { name = "google-cloud-vectorsearch" },
     { name = "python-dotenv" },
 ]
 
@@ -2449,7 +2432,6 @@ requires-dist = [
     { name = "google-adk", extras = ["eval"], marker = "extra == 'eval'", specifier = ">=2.0.0,<3.0.0" },
     { name = "google-adk", extras = ["gcp"], specifier = ">=2.0.0,<3.0.0" },
     { name = "google-cloud-aiplatform", extras = ["evaluation"], specifier = ">=1.156.0" },
-    { name = "google-cloud-vectorsearch", specifier = ">=0.4.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.4.6" },
 ]
@@ -2746,7 +2728,7 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple/" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -2805,7 +2787,7 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple/" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple/" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447, upload-time = "2026-06-19T15:01:43.456Z" }
 wheels = [
