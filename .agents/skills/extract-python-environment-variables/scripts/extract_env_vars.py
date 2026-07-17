@@ -51,6 +51,13 @@ import re
 import sys
 from pathlib import Path
 
+if sys.version_info < (3, 11):
+    sys.exit(
+        "extract_env_vars.py requires Python 3.11+ (it uses the stdlib "
+        "`tomllib`, added in 3.11). Re-run it with a newer interpreter, "
+        "e.g. `uv run --no-project python3 <this-script> ...`."
+    )
+
 import tomllib
 
 # ---------------------------------------------------------------------------
@@ -60,7 +67,7 @@ import tomllib
 PLACEHOLDER = "<TODO: update-this-value>"
 
 # Model name prefixes that indicate a hardcoded model identifier.
-# Kept in sync with validate-python-recipe.yml.
+# Kept in sync with python-validate-recipe.yml.
 MODEL_PREFIXES: tuple[str, ...] = (
     "gemini-",
     "gemini-exp-",
@@ -205,6 +212,7 @@ def extract_env_vars(py_files: list[Path]) -> dict[str, str | None]:
       When a variable appears multiple times, a non-None default wins.
     """
     found: dict[str, str | None] = {}
+    skipped: set[str] = set()
 
     for py_file in py_files:
         try:
@@ -218,9 +226,25 @@ def extract_env_vars(py_files: list[Path]) -> dict[str, str | None]:
 
         for node in ast.walk(tree):
             var_name, default = _extract_var_from_node(node)
-            if var_name and re.match(r"^[A-Z_][A-Z0-9_]*$", var_name):
+            if not var_name:
+                continue
+            if re.match(r"^[A-Z_][A-Z0-9_]*$", var_name):
                 if var_name not in found or found[var_name] is None:
                     found[var_name] = default
+            else:
+                # Not UPPER_SNAKE_CASE — dropped, but surfaced so the
+                # maintainer isn't left wondering why it never appeared in
+                # .env.example (silent drops were a reported footgun).
+                skipped.add(var_name)
+
+    if skipped:
+        print(
+            "[WARN] Ignored env var name(s) that are not UPPER_SNAKE_CASE "
+            "(only names matching ^[A-Z_][A-Z0-9_]*$ are captured; rename "
+            "them in source, or add them to .env.example by hand): "
+            + ", ".join(sorted(skipped)),
+            file=sys.stderr,
+        )
 
     return found
 
@@ -384,23 +408,70 @@ def _imports_os(tree: ast.AST) -> bool:
     return False
 
 
-_RELATIVE_IMPORT_RE = re.compile(r"^\s*from\s+\.")
 _NOQA_E402_SUFFIX = "  # noqa: E402 -- must come after load_dotenv()"
 
 
-def _maybe_suppress_e402(line: str) -> str:
-    """Append a `# noqa: E402` suffix to a relative-import line if absent.
+def _suppress_e402_on_late_relative_imports(  # noqa: C901
+    tree: ast.Module | None, lines: list[str]
+) -> tuple[list[str], int]:
+    """Append `# noqa: E402` to top-level `from .x import y` statements that
+    sit AFTER a non-import module-level statement — those are the only ones
+    Ruff actually flags as E402. A relative import at the top of the module
+    (before any non-import) is fine and left alone.
 
-    A no-op for anything that isn't a relative import (``from .x import ...``)
-    or that already carries an E402 noqa comment.
+    Returns ``(new_lines, count_of_lines_newly_marked)``. Idempotent: a line
+    that already carries an E402 noqa comment is not touched again.
     """
-    if not _RELATIVE_IMPORT_RE.match(line):
-        return line
-    if "noqa" in line and "E402" in line:
-        return line
-    stripped = line.rstrip("\n")
-    newline = line[len(stripped) :]  # preserve original line ending
-    return stripped + _NOQA_E402_SUFFIX + newline
+    if tree is None:
+        return lines, 0
+
+    # 1. Find the line of the first non-import module-level statement.
+    #    A module docstring (bare string expression at the top) is allowed
+    #    to precede imports and does NOT count as a non-import.
+    first_non_import_line: int | None = None
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            continue
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            continue
+        first_non_import_line = stmt.lineno
+        break
+
+    if first_non_import_line is None:
+        return lines, 0  # No non-imports → no E402 possible.
+
+    # 2. Collect line numbers of trailing relative imports (level > 0) that
+    #    fall past that first-non-import boundary.
+    late_lines: set[int] = set()
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.ImportFrom)
+            and stmt.level > 0
+            and stmt.lineno > first_non_import_line
+        ):
+            for lineno in range(
+                stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1
+            ):
+                late_lines.add(lineno)
+
+    if not late_lines:
+        return lines, 0
+
+    new_lines: list[str] = []
+    marked = 0
+    for i, line in enumerate(lines, start=1):
+        if i in late_lines and not ("noqa" in line and "E402" in line):
+            stripped = line.rstrip("\n")
+            newline = line[len(stripped) :]
+            new_lines.append(stripped + _NOQA_E402_SUFFIX + newline)
+            marked += 1
+        else:
+            new_lines.append(line)
+    return new_lines, marked
 
 
 def _has_load_dotenv(tree: ast.AST) -> bool:
@@ -447,58 +518,118 @@ def find_package_init(recipe_dir: Path) -> Path | None:
     return None
 
 
-def inject_load_dotenv(init_py: Path, dry_run: bool = False) -> bool:
-    """
-    Ensure load_dotenv import + bootstrap snippet exist in __init__.py.
-    Returns True if the file was (or would be) modified.
+def _last_top_level_absolute_import_line(tree: ast.Module) -> int:
+    """Return the 1-based end line of the last top-level absolute import.
 
-    When dry_run is True, no file is written; the return value still reports
-    whether the snippet would be injected.
+    Only ``tree.body`` (module-level statements) is considered, so imports
+    nested inside strings, function bodies, or ``if``/``try`` blocks are
+    ignored — a text scan cannot make that distinction and would place the
+    bootstrap inside a docstring or a conditional block (silently disabling
+    it, or producing an IndentationError). Relative imports (``from . import
+    x``, ``level > 0``) are excluded on purpose: load_dotenv() must run
+    before them so the environment is populated first.
+
+    Returns 0 when there is no top-level absolute import.
+    """
+    last = 0
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Import):
+            last = max(last, stmt.end_lineno or stmt.lineno)
+        elif isinstance(stmt, ast.ImportFrom) and stmt.level == 0:
+            last = max(last, stmt.end_lineno or stmt.lineno)
+    return last
+
+
+def inject_load_dotenv(
+    init_py: Path, dry_run: bool = False
+) -> tuple[bool, int]:
+    """
+    Ensure ``__init__.py`` bootstraps env-var loading correctly.
+
+    Does two things, in order:
+
+      1. Injects the ``from dotenv import load_dotenv`` + ``load_dotenv()``
+         bootstrap block if not already present. Insertion goes AFTER the
+         last top-level absolute import so env vars are populated before any
+         downstream package code runs.
+
+      2. Appends ``# noqa: E402`` to any trailing relative import
+         (``from .x import y``) that comes AFTER a non-import statement.
+         Runs BOTH when we just injected AND when the recipe author already
+         wrote a bootstrap (``load_dotenv()`` + ``os.environ.setdefault(...)``)
+         with trailing relative imports that were never marked — Ruff would
+         otherwise flag those as E402. The ordering is deliberate (env must
+         be populated before importing agent submodules), so suppression is
+         the correct fix, not reordering.
+
+    Returns ``(injected, noqa_added)``:
+      * ``injected``  — True if the bootstrap block was added.
+      * ``noqa_added`` — Number of trailing relative import lines newly
+        marked with ``# noqa: E402``.
+
+    Both operations are idempotent — calling again on the same file returns
+    ``(False, 0)``. When ``dry_run`` is True, the file is NOT written but
+    the return value still reports what would happen.
     """
     content = init_py.read_text(encoding="utf-8")
 
     try:
-        already_present = _has_load_dotenv(ast.parse(content))
+        tree: ast.Module | None = ast.parse(content)
     except SyntaxError:
+        tree = None
+
+    if tree is not None:
+        already_present = _has_load_dotenv(tree)
+    else:
         # Fall back to a conservative substring check on unparseable files.
         already_present = "load_dotenv" in content
-    if already_present:
-        return False  # Already present — nothing to do
-
-    if dry_run:
-        return True  # Would inject the bootstrap snippet.
 
     lines = content.splitlines(keepends=True)
+    injected = False
 
-    # Build the block to inject (import + blank line + snippet + blank line)
-    inject_block = f"\n{LOAD_DOTENV_IMPORT}\n\n{LOAD_DOTENV_SNIPPET}\n"
+    if not already_present:
+        # Build the block to inject (import + blank line + snippet + blank line)
+        inject_block = f"\n{LOAD_DOTENV_IMPORT}\n\n{LOAD_DOTENV_SNIPPET}\n"
 
-    # Find the index of the last absolute import line so we can insert after it.
-    # Relative imports (from .something) must come AFTER load_dotenv() so that
-    # the env is populated before any package module-level code runs.
-    last_import_idx: int = -1
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        is_absolute_import = stripped.startswith("import ") or (
-            stripped.startswith("from ") and not stripped.startswith("from .")
+        # Insert AFTER the last top-level absolute import (AST-based, so imports
+        # inside docstrings/functions/conditionals are never mistaken for one).
+        # Relative imports (from .something) must come AFTER load_dotenv() so
+        # the env is populated before any package module-level code runs.
+        last_import_line = (
+            _last_top_level_absolute_import_line(tree)
+            if tree is not None
+            else 0
         )
-        if is_absolute_import:
-            last_import_idx = i
 
-    if last_import_idx >= 0:
-        lines.insert(last_import_idx + 1, inject_block)
-    else:
-        # No imports — insert after license header and any module docstring
-        lines.insert(_post_header_index(lines), inject_block)
+        if last_import_line > 0:
+            # end_lineno is 1-based; index == end_lineno inserts on the next
+            # line.
+            lines.insert(last_import_line, inject_block)
+        else:
+            # No top-level imports — insert after license header + docstring.
+            lines.insert(_post_header_index(lines), inject_block)
+        injected = True
 
-    # Any relative imports (`from .x import ...`) now sit AFTER the injected
-    # load_dotenv() call, which would trigger Ruff E402 ("module-level import
-    # not at top of file"). Suppress that warning per-line, since the ordering
-    # is intentional — env must be populated before agent module-level code.
-    lines = [_maybe_suppress_e402(ln) for ln in lines]
+        # Re-split so each list element is exactly one physical line — the
 
-    init_py.write_text("".join(lines), encoding="utf-8")
-    return True
+        # spans multiple lines, so leaving it as one element would misalign
+        # indices with AST line numbers. AND re-parse so the AST reflects the
+        # post-injection state (line numbers of trailing imports shift).
+        joined = "".join(lines)
+        lines = joined.splitlines(keepends=True)
+        try:
+            tree = ast.parse(joined)
+        except SyntaxError:
+            tree = None
+
+    # Suppress E402 on any trailing relative import that comes after a
+    # non-import statement — see docstring for the two cases this covers.
+    lines, noqa_added = _suppress_e402_on_late_relative_imports(tree, lines)
+
+    if (injected or noqa_added > 0) and not dry_run:
+        init_py.write_text("".join(lines), encoding="utf-8")
+
+    return injected, noqa_added
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +828,7 @@ def extract_hardcoded_models(
     Find string literals that look like hardcoded model names in Python files.
 
     Uses AST to walk string constants and checks whether the value starts with
-    any known model prefix (same list as validate-python-recipe.yml).
+    any known model prefix (same list as python-validate-recipe.yml).
     Docstring nodes are excluded to avoid false positives from documentation.
 
     Returns:
@@ -941,7 +1072,10 @@ def run_step_env_vars(
 
 
 def run_step_load_dotenv(recipe_dir: Path, dry_run: bool = False) -> None:
-    """Step 4: inject load_dotenv() bootstrap into the package __init__.py."""
+    """Step 4: inject load_dotenv() bootstrap into the package __init__.py,
+    and suppress Ruff E402 on any trailing relative imports that come after
+    non-import statements (whether we just injected them or the author had
+    already written a bootstrap by hand)."""
     init_py = find_package_init(recipe_dir)
     if not init_py:
         print(
@@ -950,26 +1084,51 @@ def run_step_load_dotenv(recipe_dir: Path, dry_run: bool = False) -> None:
         )
         return
     rel = init_py.relative_to(recipe_dir)
-    if inject_load_dotenv(init_py, dry_run=dry_run):
+    injected, noqa_added = inject_load_dotenv(init_py, dry_run=dry_run)
+    if injected:
         verb = "Would inject" if dry_run else "Injected"
         print(f"[{_tag(dry_run)}] {verb} load_dotenv() bootstrap into {rel}")
     else:
         print(f"[PASS] load_dotenv() already present in {rel} — skipped.")
+    if noqa_added > 0:
+        verb = "Would add" if dry_run else "Added"
+        print(
+            f"[{_tag(dry_run)}] {verb} '# noqa: E402' to {noqa_added} "
+            f"trailing relative import(s) in {rel} — they come after "
+            "load_dotenv()/env-bootstrap and would otherwise trigger Ruff "
+            "E402 in Phase 4 (ordering is intentional: env must be "
+            "populated before importing agent submodules)."
+        )
 
 
 def run_step_pyproject(recipe_dir: Path, dry_run: bool = False) -> None:
     """Step 5: ensure python-dotenv>=1.0.0 is in pyproject.toml."""
     pyproject = recipe_dir / "pyproject.toml"
+    if not pyproject.exists():
+        print("[WARN] pyproject.toml not found — skipped.")
+        return
+
     if ensure_python_dotenv_dependency(pyproject, dry_run=dry_run):
         verb = "Would add" if dry_run else "Added"
         print(
             f"[{_tag(dry_run)}] {verb} python-dotenv>=1.0.0 to pyproject.toml "
             "dependencies."
         )
-    elif pyproject.exists():
+        return
+
+    # Not modified. Distinguish "already present" from "should be added but
+    # the insertion could not be made safely" (no [project] table, unparseable
+    # TOML, or the round-trip check rejected the result). The latter used to
+    # print a false "[PASS] already includes", letting the user believe the
+    # dependency was there when it was actually still missing.
+    content = pyproject.read_text(encoding="utf-8")
+    if _dependencies_has_python_dotenv(content) is True:
         print("[PASS] pyproject.toml already includes python-dotenv — skipped.")
     else:
-        print("[WARN] pyproject.toml not found — skipped.")
+        print(
+            "[WARN] Could not safely add python-dotenv to pyproject.toml — "
+            'add "python-dotenv>=1.0.0" to [project].dependencies by hand.'
+        )
 
 
 def run_step_model_names(
@@ -1005,10 +1164,19 @@ def run_step_model_names(
     if not substituted:
         return
 
-    vars_to_add = {
+    # update_env_example never persists an inferred default (it always writes
+    # the PLACEHOLDER), so pass None as each value to make that explicit —
+    # passing the model string here was misleading, implying it becomes the
+    # default. Keep the var -> model_str mapping separately, purely to tell
+    # the maintainer in the log below what value each new var replaced.
+    var_to_model = {
         var_name: model_str for model_str, var_name in substituted.items()
     }
-    added_models = update_env_example(env_example, vars_to_add, dry_run=dry_run)
+    added_models = update_env_example(
+        env_example,
+        dict.fromkeys(var_to_model),
+        dry_run=dry_run,
+    )
 
     replace_verb = "Would replace" if dry_run else "Replaced"
     for model_str, var_name in substituted.items():
@@ -1028,7 +1196,7 @@ def run_step_model_names(
             print(
                 f"[{_tag(dry_run)}] {add_verb} {var} to .env.example "
                 f"with placeholder value (the replaced hardcoded value was "
-                f'"{vars_to_add[var]}" — fill it in manually).'
+                f'"{var_to_model[var]}" — fill it in manually).'
             )
     else:
         print("[PASS] All MODEL_NAME_* vars already in .env.example — skipped.")
