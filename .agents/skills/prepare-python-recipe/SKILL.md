@@ -156,7 +156,9 @@ The check exits 0 silently on a compliant name; on violation it exits 1 with the
 
 **Only proceed past this step if the folder-name check passed.**
 
-**Step 0c — Show the plan and get confirmation.** Before running anything, briefly flag the assumptions the pipeline is making and show the user the plan. Do NOT frame these as "prerequisites" — they're a heads-up so the user can push back if any assumption is wrong, not a preflight checklist for the user to tick off:
+**Step 0c — Show the plan and get confirmation.** Before composing the plan, glance at the recipe for anything non-standard (package not called `app/`, `.env.example` outside root, missing `tests/`, extra Python source dirs, deprecated model literals per `AGENTS.md`). If any will affect what the pipeline does, flag them briefly in the plan message so the user isn't surprised mid-pipeline. Skip the flags entirely for a standard recipe.
+
+Then flag the assumptions the pipeline is making and show the user the plan. Do NOT frame these as "prerequisites" — they're a heads-up so the user can push back if any assumption is wrong, not a preflight checklist for the user to tick off:
 
 > A few things I'm assuming — say so if any aren't true:
 >   - You've deactivated any active venv.
@@ -205,10 +207,11 @@ The script:
 - Appends any newly-discovered env vars to `.env.example`
 - Injects `load_dotenv()` into the package `__init__.py` if missing
 - Adds `python-dotenv>=1.0.0` to `[project].dependencies` if missing
+- Replaces hardcoded model name strings (e.g. `"gemini-3.5-flash"`) in source files with bare `os.getenv(...)` calls and records the substitution in `.env.example`
 
-Read the script's stdout (structured `[INFO]` / `[PASS]` / `[WARN]` log lines, not a table). Extract the counts: how many vars added, whether `load_dotenv` was injected, whether `python-dotenv` was added.
+Read the script's stdout (structured `[INFO]` / `[PASS]` / `[WARN]` log lines, not a table). Extract the counts: how many vars added, whether `load_dotenv` was injected, whether `python-dotenv` was added, and how many hardcoded model names were replaced (if any).
 
-Progress line: `Phase 2 (env vars): <N> vars added to .env.example, load_dotenv <injected|already present>, python-dotenv <added|already present>.`
+Progress line: `Phase 2 (env vars): <N> vars added to .env.example, load_dotenv <injected|already present>, python-dotenv <added|already present>[, <M> hardcoded model name(s) replaced in source].`
 
 ### Phase 3 — align pyproject.toml
 
