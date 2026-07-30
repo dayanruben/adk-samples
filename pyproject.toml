@@ -16,8 +16,21 @@ validate = "validate:main"
 [dependency-groups]
 # Test-only dependencies for the repo tooling (tools/) and skill scripts
 # (.agents/skills/*/scripts/). Install with `uv sync --dev`.
+#
+# tomlkit, ruamel.yaml and packaging are imported directly by
+# .agents/skills/align-recipe-pyproject/scripts/align_pyproject.py, which
+# pytest imports via that skill's tests. Without them, collection of the
+# whole suite fails. They live here rather than in [project.dependencies]
+# because nothing under tools/ needs them at runtime.
+#
+# packaging is also imported by .github/scripts/check_recipe_pyproject.py,
+# but that gate injects its own deps via `uv run --with` and does not read
+# this group -- so it is declared here for the test run, not for that gate.
 dev = [
   "pytest>=8",
+  "tomlkit>=0.13",
+  "ruamel.yaml>=0.18",
+  "packaging>=24",
 ]
 
 [build-system]
@@ -94,9 +107,14 @@ indent-style = "space"
 addopts = "--import-mode=importlib"
 # Only the repo tooling and skill scripts are tested here. Recipe tests under
 # core/ and contrib/ have their own per-recipe suites (see python-tests.yml).
+# .github/scripts has no tests yet; it is listed so that any added later are
+# collected without a config change. Those scripts gate real PRs (e.g.
+# check_env_vars.py and check_recipe_pyproject.py run in
+# python-validate-recipe.yml) and are currently uncovered.
 testpaths = [
   "tools/tests",
   ".agents/skills",
+  ".github/scripts",
 ]
 # Never descend into skill template payloads or virtualenvs. The scaffold
 # skill ships template test files under resources/templates/tests/ that contain
