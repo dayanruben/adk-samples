@@ -59,6 +59,8 @@ CI log, or [jump to Something else](#something-else).
 
 **Other**
 - [CI infrastructure failure](#ci-infrastructure-failure)
+- [Core recipe is behind the current ADK major](#core-recipe-is-behind-the-current-adk-major)
+- [Recipe is marked inactive](#recipe-is-marked-inactive)
 - [Non-blocking notices](#non-blocking-notices)
 - [Something else](#something-else)
 
@@ -502,6 +504,86 @@ unusual file encoding, a hand-edited `uv.lock` — say so in the issue.
 The checker should report that as a clear error rather than crash, so
 it is a bug in the checker either way.
 
+## Core recipe is behind the current ADK major
+
+**Workflow:** [`python-validate-recipe.yml`](../../.github/workflows/python-validate-recipe.yml)
+
+CI output contains: `adk-major-current`, alongside either `cannot resolve to google-adk` or `pins google-adk`
+
+**This will not block your PR.** It is a notice, not an error.
+
+A recipe under `core/` resolves to a `google-adk` major older than the one
+curated recipes are expected to demonstrate. It still runs — that is the
+problem. A reader clones a curated recipe expecting the current way to write
+an agent, and an out-of-date one teaches a surface that has moved on without
+anything about running it saying so.
+
+The notice appears in two forms, because the fixes differ:
+
+- **"cannot resolve to google-adk N.x"** — `pyproject.toml` caps the
+  dependency below the current major (`<2.0.0`, or a hard pin like
+  `==1.31.0`). Re-locking cannot help until the declaration changes.
+- **"uv.lock pins google-adk X, but ... already permits N.x"** — the
+  declaration is fine and only the lock is behind. This is the case a
+  specifier-only check misses: `google-adk>=1.8.0` admits 2.x while the
+  recipe still installs 1.28.0.
+
+A third variant flags a **prerelease** lock (e.g. `2.0.0a3`). That is on the
+current major, so it is not stale — but anyone who clones the recipe inherits
+a dependency that can change with no deprecation path.
+
+**Fix:** port the recipe to the current major, then
+
+```bash
+uv lock --upgrade-package google-adk --project <recipe-dir>
+```
+
+Crossing an ADK major is a code migration, not a version bump. Widening the
+specifier without porting the code produces a recipe that fails at runtime
+rather than in CI, which is strictly worse than the notice you started with.
+
+If you are only passing through, leave it — that is what "non-blocking"
+means. The recipe's owner (`ownership.poc` in its `manifest.yaml`) owns this.
+
+## Recipe is marked inactive
+
+**Workflow:** [`validate-recipe-structure.yml`](../../.github/workflows/validate-recipe-structure.yml)
+
+CI output contains: `recipe-inactive`, or `is marked ` followed by `` `status: inactive` ``
+
+**This will not block your PR.** It is a notice.
+
+The recipe's `manifest.yaml` declares `status: inactive`. That is not a
+label for "we don't use this much" — it is a position on a clock.
+
+The monthly recipe canary (`.github/workflows/recipe-canary.yml`) installs
+each recipe from its committed lockfile and runs its tests. Each run that
+still fails advances the recipe's tracking issue by one stage:
+
+| failing run | what happens |
+|---|---|
+| 1st | a tracking issue is opened and the owner notified |
+| 2nd | reminder on that issue |
+| 3rd | the canary asks for the recipe to be marked `status: inactive` |
+| 4th | notice that deletion is scheduled |
+| 5th | removal of the recipe is proposed |
+
+The canary runs monthly, so that is roughly a month per stage. The schedule
+only ever slips later — a missed run costs a stage — never sooner.
+
+**The canary cannot make any of these file changes itself.** It has no write
+access to the repository, so `status: inactive` is only ever a request left
+on the tracking issue: a human applies it, or nobody does. It follows that
+the canary also cannot tell whether the manifest was ever actually changed.
+
+**If you are reviving the recipe**, set `status: active` in the same PR.
+Nothing else will. Fixing the recipe closes the tracking issue, but the
+manifest keeps whatever a human last wrote in it.
+
+**If you are just passing through** — editing docs, fixing a typo — ignore
+this. The recipe's owner (`ownership.poc` in its `manifest.yaml`) owns the
+decision.
+
 ## Non-blocking notices
 
 **The following will not block your PR.** Fix them when convenient.
@@ -510,6 +592,8 @@ it is a bug in the checker either way.
   Run `extract-python-environment-variables`.
 - **`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` / `MODEL_NAME`
   missing from `.env.example`** — add them if your recipe uses them.
+- **Core recipe behind the current ADK major** — see the section above.
+- **Recipe marked `status: inactive`** — see the section above.
 
 ## Something else
 
