@@ -73,6 +73,12 @@ jobs:
 
           echo "🔍 Finding issues untriaged as of ${CUTOFF}..."
 
+          if [[ "$(gh api "repos/${GH_REPO}" --jq '.has_issues')" != 'true' ]]; then
+            echo "::notice::Repository Issues are disabled; skipping scheduled triage."
+            echo 'issues_to_triage=[]' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           # "Untriaged" means the issue carries NO labels at all.
           #
           # An earlier revision defined it as "no kind/* and no priority/*
