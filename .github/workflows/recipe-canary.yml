@@ -391,6 +391,7 @@ jobs:
           PY
 
       - name: Update issues
+        if: ${{ !github.event.repository.fork && github.event.repository.has_issues }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
